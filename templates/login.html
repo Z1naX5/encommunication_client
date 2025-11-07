@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>登录/注册</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 400px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      .tabs {
+        display: flex;
+        margin-bottom: 20px;
+      }
+      .tab {
+        padding: 10px 20px;
+        cursor: pointer;
+        border: 1px solid #ccc;
+        background: #f0f0f0;
+      }
+      .tab.active {
+        background: #fff;
+        border-bottom: 1px solid #fff;
+        position: relative;
+        top: 1px;
+      }
+      .content {
+        border: 1px solid #ccc;
+        padding: 20px;
+        background: #fff;
+      }
+      .form-group {
+        margin-bottom: 15px;
+      }
+      input {
+        width: 100%;
+        padding: 8px;
+        margin-top: 5px;
+        box-sizing: border-box;
+      }
+      button {
+        width: 100%;
+        padding: 10px;
+        background: #007bff;
+        color: white;
+        border: none;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #0056b3;
+      }
+      .error {
+        color: red;
+        margin-top: 5px;
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>登录/注册</h2>
+
+    <div class="tabs">
+      <div
+        class="tab active"
+        onclick="switchTab('login')"
+      >
+        登录
+      </div>
+      <div
+        class="tab"
+        onclick="switchTab('register')"
+      >
+        注册
+      </div>
+    </div>
+
+    <!-- 登录表单 -->
+    <div
+      id="login-content"
+      class="content"
+    >
+      <div class="form-group">
+        <label>用户名：</label>
+        <input
+          id="login-username"
+          type="text"
+        />
+      </div>
+      <div class="form-group">
+        <label>密码：</label>
+        <input
+          id="login-password"
+          type="password"
+        />
+      </div>
+      <div
+        class="error"
+        id="login-error"
+      ></div>
+      <button onclick="login()">登录</button>
+    </div>
+
+    <!-- 注册表单 -->
+    <div
+      id="register-content"
+      class="content"
+      style="display: none"
+    >
+      <div class="form-group">
+        <label>用户名：</label>
+        <input
+          id="register-username"
+          type="text"
+        />
+      </div>
+      <div class="form-group">
+        <label>密码：</label>
+        <input
+          id="register-password"
+          type="password"
+        />
+      </div>
+      <div class="form-group">
+        <label>确认密码：</label>
+        <input
+          id="register-repassword"
+          type="password"
+        />
+      </div>
+      <div
+        class="error"
+        id="register-error"
+      ></div>
+      <button onclick="register()">注册</button>
+    </div>
+
+    <script>
+      // 切换标签页
+      function switchTab(tab) {
+        // 更新标签样式
+        document
+          .querySelectorAll(".tab")
+          .forEach((t) => t.classList.remove("active"));
+        event.target.classList.add("active");
+
+        // 显示/隐藏内容
+        if (tab === "login") {
+          document.getElementById("login-content").style.display = "block";
+          document.getElementById("register-content").style.display = "none";
+        } else {
+          document.getElementById("login-content").style.display = "none";
+          document.getElementById("register-content").style.display = "block";
+        }
+
+        // 清除错误信息
+        document.getElementById("login-error").style.display = "none";
+        document.getElementById("register-error").style.display = "none";
+      }
+
+      // 显示错误信息
+      function showError(elementId, message) {
+        const errorElement = document.getElementById(elementId);
+        errorElement.textContent = message;
+        errorElement.style.display = "block";
+      }
+
+      // 登录函数
+      async function login() {
+        const username = document.getElementById("login-username").value;
+        const password = document.getElementById("login-password").value;
+
+        if (!username || !password) {
+          showError("login-error", "请填写用户名和密码");
+          return;
+        }
+
+        try {
+          const res = await fetch("/api/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username, password }),
+          });
+
+          const data = await res.json();
+          console.log(data);
+          //   if (data.code === 1 && data.data.token) {
+          //     alert("登录成功");
+          //     window.location.href = "/users";
+          //   } else {
+          //     showError("login-error", data.msg || "登录失败");
+          //   }
+        } catch (error) {
+          showError("login-error", "登录出错，请稍后重试");
+        }
+      }
+
+      // 注册函数
+      async function register() {
+        const username = document.getElementById("register-username").value;
+        const password = document.getElementById("register-password").value;
+        const repassword = document.getElementById("register-repassword").value;
+
+        // 验证输入
+        if (!username || !password || !repassword) {
+          showError("register-error", "请填写所有字段");
+          return;
+        }
+
+        try {
+          const res = await fetch("/api/register", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              username,
+              password,
+              repassword,
+            }),
+          });
+
+          // const data = await res.json();
+          // if (data.code === 1) {
+          //   alert("注册成功，请登录");
+          //   switchTab("login"); // 切换到登录页
+          // } else {
+          //   showError("register-error", data.msg || "注册失败");
+          // }
+        } catch (error) {
+          showError("register-error", "注册出错，请稍后重试");
+        }
+      }
+    </script>
+  </body>
+</html>
