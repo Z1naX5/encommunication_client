@@ -1,13 +1,25 @@
 import webbrowser
 from flask import Flask, render_template, request, jsonify
-from ws_client import WSClient
+from ws_client import WSClient, online_users
 import requests
-from crypto_utils import load_or_generate_keys, serialize_public_key
+from crypto_utils import load_or_generate_keys, serialize_public_key, rsa_decrypt
+import base64
+from crypto_utils import aes_gcm_decrypt
+import time
 
 app = Flask(__name__)
-ws_clients = {}  # username -> WSClient实例
-server_address = "192.168.1.2:8080"
+ws_clients = {}  # id -> WSClient实例
+server_address = "192.168.1.5:8080"
 CHAT_RECORDS_FILE = "chat_records.json"
+
+
+def _make_resp(code: int, msg: str, data=None, status_code: int = 200):
+    """统一返回格式：{ code: 1|0, msg: str, data: ... } 以及 HTTP 状态码
+
+    code: 1 表示成功，0 表示失败
+    """
+    payload = {"code": code, "msg": msg, "data": data}
+    return jsonify(payload), status_code
 
 
 # ------------------------------
@@ -54,26 +66,25 @@ def login():
 
                 user_id = user_data.get("id")
                 token = user_data.get("token")
-                print(user_id, token)
-                username = user_data.get("userName")
-
+                username = user_data.get("username")
                 client = WSClient(user_id, username, token)
-                ws_clients[username] = client
+                ws_clients[user_id] = client
                 client.start()
 
-                return jsonify({"token": token, "message": "登录成功"})
+                return _make_resp(1, "登录成功", {"token": token})
             else:
-                return jsonify({"error": "后端未返回有效的code"}), 400
+                return _make_resp(0, "后端未返回有效的 code", backend_data, 400)
         else:
-            error_data = response.json()
-            return jsonify(
-                {"error": error_data.get("error", "登录失败")}
-            ), response.status_code
+            try:
+                error_data = response.json()
+            except Exception:
+                error_data = None
+            return _make_resp(0, "登录失败", error_data, response.status_code)
 
     except requests.exceptions.RequestException as e:
-        return jsonify({"error": f"无法连接到后端服务器: {str(e)}"}), 500
+        return _make_resp(0, f"无法连接到后端服务器: {str(e)}", None, 500)
     except Exception as e:
-        return jsonify({"error": f"服务器错误: {str(e)}"}), 500
+        return _make_resp(0, f"服务器错误: {str(e)}", None, 500)
 
 
 @app.route("/api/register", methods=["POST"])
@@ -102,52 +113,144 @@ def register():
             backend_url, json=payload, headers={"Content-Type": "application/json"}
         )
 
+        if response.status_code == 200:
+            backend_data = response.json()
+            if backend_data.get("code") != 0:
+                return _make_resp(1, "注册成功", backend_data.get("data"))
+            else:
+                return _make_resp(0, "注册失败", backend_data, 400)
+        else:
+            return _make_resp(0, "注册失败: 后端返回非200", None, response.status_code)
+
     except Exception as e:
-        return jsonify({"code": 0, "msg": str(e), "data": None}), 500
+        return _make_resp(0, str(e), None, 500)
+
+
+@app.route("/api/online_users", methods=["GET"])
+def get_online_users():
+    return _make_resp(1, "ok", {"users": online_users})
 
 
 @app.route("/api/send_message", methods=["POST"])
 def send_message():
     data = request.json
-    username = data["username"]
-    target_id = data["target_id"]
-    message = data["message"]
+    if not data:
+        return _make_resp(0, "No JSON data", None, 400)
 
-    client = ws_clients.get(username)
+    try:
+        from_id = int(data["from_id"])
+        target_id = int(data["target_id"])
+        message = data["message"]
+    except (KeyError, ValueError, TypeError):
+        return _make_resp(0, "Invalid message format", None, 400)
+
+    client = ws_clients.get(from_id)
     if client:
-        client.send_encrypted_message(target_id, message)
-        return jsonify({"status": "ok"})
-    return jsonify({"status": "fail", "reason": "no client"})
+        if not client.connected:
+            print("[Flask] 等待 WebSocket 连接...")
+            client.start()
+            time.sleep(1)  # 等待连接几秒再试
+
+        ok = client.send_encrypted_message(target_id, message)
+        if ok:
+            return _make_resp(1, "ok", None)
+        else:
+            return _make_resp(0, "发送失败: 客户端未就绪", None, 500)
+    return _make_resp(0, "no client", None, 400)
 
 
 @app.route("/api/chat/records", methods=["GET"])
 def get_chat_records():
     backend_url = f"http://{server_address}/chatRecords"
     try:
+        # 获取并验证参数
         from_id = request.args.get("fromId")
         to_id = request.args.get("toId")
 
-        if not all([from_id, to_id]):
-            return jsonify({"code": 0, "msg": "缺少必要参数", "data": None}), 400
+        if not from_id or not to_id:
+            return jsonify(
+                {"code": 0, "msg": "Missing fromId or toId", "data": None}
+            ), 400
+
+        try:
+            from_id = int(from_id)
+            to_id = int(to_id)
+        except (ValueError, TypeError):
+            return jsonify({"code": 0, "msg": "Invalid ID format", "data": None}), 400
+
+        # 验证客户端存在
+        if from_id not in ws_clients:
+            return jsonify({"code": 0, "msg": "Sender not found", "data": None}), 400
 
         # 加载记录
-        records = load_chat_records()
-
-        # 筛选记录
-        filtered_records = [
-            record
-            for record in records["records"]
-            if (record["fromId"] == int(from_id) and record["toId"] == int(to_id))
-            or (record["fromId"] == int(to_id) and record["toId"] == int(from_id))
-        ]
-
-        return jsonify(
-            {
-                "code": 1,
-                "msg": None,
-                "data": {"total": len(filtered_records), "records": filtered_records},
-            }
+        payload = {"fromId": from_id, "toId": to_id}
+        response = requests.get(
+            backend_url,
+            params=payload,
+            headers={"token": ws_clients[from_id].token},
         )
+        if response.status_code == 200:
+            backend_data = response.json()
+
+            if backend_data.get("code") != 0:
+                records_data = backend_data.get("data", {})
+                records = records_data.get("records", [])
+                records_ret = []
+
+                for record in records:
+                    try:
+                        create_time = record.get("createTime")
+                        en_msg = record.get("chat", "")
+
+                        # 尝试从可用的字段中解密 AES 密钥（toAesKey / fromAesKey）
+                        aes_candidates = [
+                            record.get("toAesKey", ""),
+                            record.get("fromAesKey", ""),
+                        ]
+                        K = None
+                        for a in aes_candidates:
+                            if not a:
+                                continue
+                            try:
+                                K = rsa_decrypt(
+                                    ws_clients[from_id].priv_key, base64.b64decode(a)
+                                )
+                                break
+                            except Exception:
+                                K = None
+
+                        if K is None:
+                            plaintext = "[无法解密消息]"
+                        else:
+                            try:
+                                enc_bytes = base64.b64decode(en_msg)
+                                iv, ct, tag = (
+                                    enc_bytes[:12],
+                                    enc_bytes[12:-16],
+                                    enc_bytes[-16:],
+                                )
+                                plaintext = aes_gcm_decrypt(K, iv, ct, tag).decode()
+                            except Exception:
+                                plaintext = "[解密失败]"
+
+                        records_ret.append(
+                            {
+                                "id": record.get("id"),
+                                "fromId": record.get("fromId"),
+                                "toId": record.get("toId"),
+                                "chat": plaintext,
+                                "createTime": create_time,
+                            }
+                        )
+                    except Exception as e:
+                        # 单条记录处理失败时继续处理其他记录
+                        print(f"[记录处理错误] {e}")
+
+                return _make_resp(1, "ok", {"records": records_ret})
+            else:
+                return _make_resp(0, "后端返回错误", backend_data, 400)
+        else:
+            return _make_resp(0, "无法获取聊天记录: 后端非200响应", None, 500)
 
     except Exception as e:
         return jsonify({"code": 0, "msg": str(e), "data": None}), 500

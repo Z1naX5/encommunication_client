@@ -22,7 +22,7 @@ def generate_large_prime(bits=16):
 
 def generate_rsa_keys():
     public_exponent = generate_large_prime(16)
-    private_key = rsa.generate_private_key(public_exponent, key_size=2048)
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     public_key = private_key.public_key()
     return private_key, public_key
 
@@ -42,26 +42,51 @@ def serialize_private_key(priv):
     ).decode()
 
 
-def rsa_encrypt(public_key_pem, data: bytes):
-    pub = serialization.load_pem_public_key(public_key_pem.encode())
+def rsa_encrypt(public_key_pem_or_obj, data: bytes):
+    if isinstance(public_key_pem_or_obj, (str, bytes)):
+        if isinstance(public_key_pem_or_obj, str):
+            public_key_pem_or_obj = public_key_pem_or_obj.encode()
+        pub = serialization.load_pem_public_key(public_key_pem_or_obj)
+    else:
+        # 已经是 RSA 公钥对象
+        pub = public_key_pem_or_obj
+
+    # 保留你原先的加密逻辑
     return pub.encrypt(data, padding.PKCS1v15())
 
 
 def rsa_decrypt(private_key_pem, ciphertext: bytes):
-    priv = serialization.load_pem_private_key(private_key_pem.encode(), password=None)
+    # Accept either a PEM string/bytes or an already-loaded private key object
+    if isinstance(private_key_pem, (str, bytes)):
+        if isinstance(private_key_pem, str):
+            private_key_pem = private_key_pem.encode()
+        priv = serialization.load_pem_private_key(private_key_pem, password=None)
+    else:
+        # assume it's already a private key object compatible with cryptography
+        priv = private_key_pem
+
     return priv.decrypt(ciphertext, padding.PKCS1v15())
 
 
 def rsa_verify(public_key, message: bytes, signature: bytes) -> bool:
-    public_key_obj = serialization.load_pem_public_key(public_key.encode())
+    # Accept either a PEM string/bytes or an already-loaded public key object
+    if isinstance(public_key, (str, bytes)):
+        if isinstance(public_key, str):
+            public_key = public_key.encode()
+        public_key_obj = serialization.load_pem_public_key(public_key)
+    else:
+        public_key_obj = public_key
+
     public_key_obj.verify(signature, message, padding.PKCS1v15(), hashes.SHA256())
     print("Signature is valid.")
     return True
 
 
 # === symmetric encryption ===#
+
+
 def gen_sym_key():
-    return Fernet.generate_key()
+    return os.urandom(32)  # 32 bytes = 256 bits
 
 
 def aes_gcm_encrypt(key: bytes, plaintext: bytes):
