@@ -122,6 +122,50 @@ HTTP 状态码会根据场景设置（例如 200 / 400 / 500）。
   { "code": 0, "msg": "错误描述", "data": null }
 - 说明：接口会代理请求到后端 `/chatRecords`，并尝试使用本地私钥解密每条记录中的 AES 密钥（会尝试 `toAesKey`、`fromAesKey` 两个字段），再用 AES 解密聊天内容。如果解密失败，会把 `chat` 字段标记为 `[无法解密消息]` 或 `[解密失败]`。
 
+6. SSE 数据流订阅 (Server-Sent Events)
+
+- 路由：GET /api/stream
+- 请求参数：无
+- 响应类型：text/event-stream
+- 响应格式：
+  ```
+  data: {"消息内容..."}\n\n
+  ```
+- 说明：
+  - 浏览器通过 EventSource 订阅此端点接收服务器推送的消息
+  - 连接会保持打开状态，服务器可以持续推送数据
+  - 每条消息以 `\n\n` 结尾（SSE 标准格式）
+  - JavaScript 使用示例：
+    ```javascript
+    const evtSource = new EventSource("/api/stream");
+    evtSource.onmessage = function (event) {
+      const data = JSON.parse(event.data);
+      console.log("收到服务器推送:", data);
+    };
+    ```
+
+7. 消息推送接口（注：前端用不到，这是一个暂时仅用于客户端内部的接口）
+
+- 路由：POST /push
+- 请求 body (JSON): 任意 JSON 数据（将被推送给所有 SSE 订阅者）
+- 成功响应:
+  ```json
+  { "status": "ok" }
+  ```
+- 说明：
+  - 此接口供 WebSocket 客户端或内部服务调用
+  - 接收到的消息会通过 SSE 推送给所有订阅的浏览器
+  - 消息进入队列（Queue）后异步推送
+
+### 关于实时消息推送
+
+系统使用 Server-Sent Events (SSE) 实现服务器向浏览器的实时消息推送：
+
+- 系统使用 Queue 在 WebSocket 接收端和 SSE 推送端之间传递消息
+- SSE 连接保持长期开启，支持自动重连
+- 每个浏览器客户端通过 EventSource 订阅，可以接收所有推送的消息
+- 适用于：聊天消息通知、在线状态更新等需要服务器主动推送的场景
+
 ### 关于 WebSocket (WSClient)
 
 - `main.py` 在登录成功后会创建 `WSClient(user_id, username, token)` 并启动：客户端会使用 token 与后端建立 WebSocket 连接，用于接收在线用户信息、密钥交换与消息转发。
