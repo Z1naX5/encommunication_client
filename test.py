@@ -21,7 +21,7 @@ def test_login():
     res = requests.post(f"{base_url}/api/login", json=payload)
     print("登录返回：", res.json())
     if res.status_code == 200:
-        return res.json().get("token")
+        return res.json().get("data")["token"]
     return None
 
 
@@ -43,10 +43,6 @@ def test_send_message(token, from_id, to_id):
         "target_id": to_id,
         "message": "Hello, this is a test message!",
     }
-    # 确保WebSocket连接已建立
-    import time
-
-    time.sleep(2)  # 等待WebSocket连接完全建立
 
     res = requests.post(f"{base_url}/api/send_message", json=data, headers=headers)
     print("发送消息返回：", res.json())
@@ -92,12 +88,13 @@ def main():
     else:
         print("发送消息失败")
 
-    # time.sleep(20)  # 等待消息发送完成
+    time.sleep(10)
+
     # 测试获取聊天记录
-    # if test_chat_records(token, from_id=1, to_id=2):
-    #     print("获取聊天记录成功")
-    # else:
-    #     print("获取聊天记录失败")
+    if test_chat_records(token, from_id=1, to_id=2):
+        print("获取聊天记录成功")
+    else:
+        print("获取聊天记录失败")
 
 
 if __name__ == "__main__":
