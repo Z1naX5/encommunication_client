@@ -1,15 +1,23 @@
 import webbrowser
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response
 from ws_client import WSClient, online_users
 import requests
-from crypto_utils import load_or_generate_keys, serialize_public_key, rsa_decrypt
+from crypto_utils import (
+    load_or_generate_keys,
+    serialize_public_key,
+    rsa_decrypt,
+    aes_gcm_decrypt,
+)
 import base64
-from crypto_utils import aes_gcm_decrypt
+import queue
 import time
 
 app = Flask(__name__)
+host = "127.0.0.1"
+port = 5000
+message_queue = queue.Queue()
 ws_clients = {}  # id -> WSClient实例
-server_address = "192.168.1.5:8080"
+server_address = "172.16.2.82:8080"
 CHAT_RECORDS_FILE = "chat_records.json"
 
 
@@ -67,7 +75,7 @@ def login():
                 user_id = user_data.get("id")
                 token = user_data.get("token")
                 username = user_data.get("username")
-                client = WSClient(user_id, username, token)
+                client = WSClient(user_id, username, token, host, port)
                 ws_clients[user_id] = client
                 client.start()
 
@@ -108,7 +116,7 @@ def register():
             "repassword": repassword,
             "publicKey": serialize_public_key(pub_key),
         }
-        print(payload)
+        # print(payload)
         response = requests.post(
             backend_url, json=payload, headers={"Content-Type": "application/json"}
         )
@@ -129,6 +137,28 @@ def register():
 @app.route("/api/online_users", methods=["GET"])
 def get_online_users():
     return _make_resp(1, "ok", {"users": online_users})
+
+
+# push仅用于websocket向前推送消息
+@app.route("/push", methods=["POST"])
+def push_message():
+    """WebSocket 或内部调用，把消息推送给浏览器"""
+    data = request.json
+    message_queue.put(data)
+    print(f"[推送消息] {data}")
+    return {"status": "ok"}
+
+
+@app.route("/api/stream")
+def stream():
+    """SSE 数据流：浏览器通过 EventSource 订阅"""
+
+    def event_stream():
+        while True:
+            msg = message_queue.get()  # 阻塞等待消息
+            yield f"data: {msg}\n\n"  # SSE 格式：每条消息以 \n\n 结尾
+
+    return Response(event_stream(), content_type="text/event-stream")
 
 
 @app.route("/api/send_message", methods=["POST"])
@@ -166,7 +196,6 @@ def get_chat_records():
         # 获取并验证参数
         from_id = request.args.get("fromId")
         to_id = request.args.get("toId")
-
         if not from_id or not to_id:
             return jsonify(
                 {"code": 0, "msg": "Missing fromId or toId", "data": None}
@@ -190,65 +219,41 @@ def get_chat_records():
             headers={"token": ws_clients[from_id].token},
         )
         if response.status_code == 200:
-            backend_data = response.json()
+            records = response.json()
+            print(records)
 
-            if backend_data.get("code") != 0:
-                records_data = backend_data.get("data", {})
-                records = records_data.get("records", [])
-                records_ret = []
+            records_ret = []
 
-                for record in records:
-                    try:
-                        create_time = record.get("createTime")
-                        en_msg = record.get("chat", "")
+            for record in records:
+                try:
+                    create_time = record.get("createTime")
+                    en_msg = record.get("message", "")
 
-                        # 尝试从可用的字段中解密 AES 密钥（toAesKey / fromAesKey）
-                        aes_candidates = [
-                            record.get("toAesKey", ""),
-                            record.get("fromAesKey", ""),
-                        ]
-                        K = None
-                        for a in aes_candidates:
-                            if not a:
-                                continue
-                            try:
-                                K = rsa_decrypt(
-                                    ws_clients[from_id].priv_key, base64.b64decode(a)
-                                )
-                                break
-                            except Exception:
-                                K = None
+                    if from_id == record.get("fromId"):
+                        aes_key = record.get("toAesKey", "")
+                    else:
+                        aes_key = record.get("fromAesKey", "")
+                    K = rsa_decrypt(
+                        ws_clients[from_id].priv_key, base64.b64decode(aes_key)
+                    )
+                    enc_bytes = base64.b64decode(en_msg)
+                    iv, ct, tag = enc_bytes[:12], enc_bytes[12:-16], enc_bytes[-16:]
+                    plaintext = aes_gcm_decrypt(K, iv, ct, tag).decode()
 
-                        if K is None:
-                            plaintext = "[无法解密消息]"
-                        else:
-                            try:
-                                enc_bytes = base64.b64decode(en_msg)
-                                iv, ct, tag = (
-                                    enc_bytes[:12],
-                                    enc_bytes[12:-16],
-                                    enc_bytes[-16:],
-                                )
-                                plaintext = aes_gcm_decrypt(K, iv, ct, tag).decode()
-                            except Exception:
-                                plaintext = "[解密失败]"
+                    records_ret.append(
+                        {
+                            "id": record.get("id"),
+                            "fromId": record.get("fromId"),
+                            "toId": record.get("toId"),
+                            "chat": plaintext,
+                            "createTime": create_time,
+                        }
+                    )
+                except Exception as e:
+                    # 单条记录处理失败时继续处理其他记录
+                    print(f"[记录处理错误] {e}")
 
-                        records_ret.append(
-                            {
-                                "id": record.get("id"),
-                                "fromId": record.get("fromId"),
-                                "toId": record.get("toId"),
-                                "chat": plaintext,
-                                "createTime": create_time,
-                            }
-                        )
-                    except Exception as e:
-                        # 单条记录处理失败时继续处理其他记录
-                        print(f"[记录处理错误] {e}")
-
-                return _make_resp(1, "ok", {"records": records_ret})
-            else:
-                return _make_resp(0, "后端返回错误", backend_data, 400)
+            return _make_resp(1, "ok", {"records": records_ret})
         else:
             return _make_resp(0, "无法获取聊天记录: 后端非200响应", None, 500)
 
@@ -259,4 +264,6 @@ def get_chat_records():
 if __name__ == "__main__":
     # 启动浏览器访问
     # webbrowser.open("http://127.0.0.1:5000")
-    app.run(debug=True)
+
+    # 如需要开启两个客户端，可以复制一摸一样的命名为 main.py，修改端口
+    app.run(host=host, port=port, debug=True)

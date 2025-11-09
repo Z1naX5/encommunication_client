@@ -3,7 +3,6 @@ import threading
 import json
 import base64
 import websockets
-import time
 from flask import Flask
 from crypto_utils import (
     load_or_generate_keys,
@@ -14,6 +13,7 @@ from crypto_utils import (
     gen_sym_key,
     aes_gcm_encrypt,
     aes_gcm_decrypt,
+    serialize_public_key,
 )
 
 online_users = {}  # id -> username
@@ -21,17 +21,20 @@ message = {}
 
 
 class WSClient:
-    def __init__(self, id, username, token):
+    def __init__(self, id, username, token, host, port):
+        self.my_id = id
         self.username = username
         self.token = token
+        self.flask_server = host + str(port)
+
         self.ws = None
         self.connected = False
         self._lock = threading.Lock()  # 用于同步操作
         self.loop = None  # 延迟初始化事件循环
         self._async_lock = None  # 延迟初始化异步锁
-        self.my_id = id
         self.peer_pubkeys = {}  # id -> PEM
         self.sym_keys = {}  # id -> AES key
+        self.sym_aeskeysb64 = {}  # id -> enAES key
         self.key_status = {}  # id -> str: 'pending', 'confirmed', 'error'
         self.message_queue = {}  # id -> list: 待发送的消息队列
         self.priv_key, self.pub_key = load_or_generate_keys(username)
@@ -43,7 +46,7 @@ class WSClient:
             t.daemon = True
             t.start()
 
-    def run(self, server_address="192.168.1.5:8080"):
+    def run(self, server_address="172.16.2.82:8080"):
         try:
             if not self.loop:
                 self.loop = asyncio.new_event_loop()
@@ -147,8 +150,6 @@ class WSClient:
                     if self.sym_keys[from_id] == received_key:
                         print(f"[密钥确认] 与用户 {from_id} 的密钥已同步")
                         self.key_status[from_id] = "confirmed"
-                        # 添加延迟，等待服务器处理密钥确认
-                        # await asyncio.sleep(0.5)  # 500ms delay
                         await self._send_queued_messages(from_id)
 
                     else:
@@ -176,6 +177,7 @@ class WSClient:
                                 }
                             )
                         )
+                    self.key_status[from_id] = "confirmed"
                     print(f"[密钥交换] 已向用户 {from_id} 发送确认")
 
             except Exception as e:
@@ -195,13 +197,18 @@ class WSClient:
 
                 plaintext = self.decrypt_message(from_id, message)
                 print(f"[收到消息] 来自 {from_id}: {plaintext}")
+                import requests
+
+                requests.post(
+                    f"http://{self.flask_server}/push",
+                    json={"fromId": from_id, "content": plaintext},
+                )
 
             except Exception as e:
                 print(f"[消息解密错误] {str(e)}")
 
     async def _send_queued_messages(self, target_id):
         """发送队列中的消息"""
-        print("entry _send_queued_messages")
         if target_id in self.message_queue:
             while self.message_queue[target_id]:
                 msg = self.message_queue[target_id].pop(0)
@@ -216,7 +223,6 @@ class WSClient:
 
     async def _send_message(self, target_id, msg):
         """实际发送消息的方法"""
-        print("entry _send_message")
         if not self._async_lock:
             self._async_lock = asyncio.Lock()
 
@@ -230,17 +236,15 @@ class WSClient:
             iv, ct, tag = aes_gcm_encrypt(K, msg.encode())
             final = iv + ct + tag
 
-            peer_pub = load_public_key(self.peer_pubkeys[target_id])
-            encK = rsa_encrypt(peer_pub, K)
+            aes_key = self.sym_aeskeysb64[target_id]
 
             data = {
                 "fromId": self.my_id,
                 "toId": target_id,
                 "message": base64.b64encode(final).decode(),
-                "aesKey": base64.b64encode(encK).decode(),
+                "aesKey": aes_key,
             }
-            print("send message")
-            print(data)
+            # print(data)
             async with self._async_lock:
                 await ws.send(json.dumps(data))
 
@@ -288,9 +292,10 @@ class WSClient:
                         peer_pub = load_public_key(peer_pub_obj)
                     else:
                         peer_pub = peer_pub_obj
+                    print(f"pub{serialize_public_key(peer_pub)}")
 
                     encK = rsa_encrypt(peer_pub, K)
-
+                    print(f"key:{K}")
                     payload = json.dumps(
                         {
                             "fromId": self.my_id,
@@ -299,6 +304,9 @@ class WSClient:
                             "aesKey": base64.b64encode(encK).decode(),
                         }
                     )
+
+                    print(f"aesKey:{base64.b64encode(encK).decode()}")
+                    self.sym_aeskeysb64[target_id] = base64.b64encode(encK).decode()
 
                     async def send_key():
                         ws = await self.ensure_connection()
